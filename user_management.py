@@ -1,60 +1,96 @@
 import sqlite3 as sql
-import time
+import html
 import random
+import time
+import hashlib
+import os
+import base64
 
+def hash_password(password, salt):
+    """
+    Hash the password using SHA-256 with a salt.
+    Returns the salt and the hashed password in base64 format for storage.
+    """
+    salted_password = salt + password.encode('utf-8')
+    sha256_hash = hashlib.sha256()
+    sha256_hash.update(salted_password)
+    hashed_password = sha256_hash.digest()
+    return base64.b64encode(hashed_password).decode('utf-8')
+
+
+def generate_salt():
+    """
+    Generate a random salt using os.urandom for better randomness.
+    """
+    return base64.b64encode(os.urandom(16)).decode('utf-8')
 
 def insertUser(username, password, DoB):
+    hashed_password = hash_password(password) #hash the password
     con = sql.connect("database_files/database.db")
     cur = con.cursor()
+    """
+    These are parametrized queries.
+    Parameterized queries separate the SQL query from the user input values. 
+    The user input values are passed as parameters, which are treated as literal values and checked for type and length.
+    So they are not executed as part of the SQL command.
+    """
     cur.execute(
-        "INSERT INTO users (username,password,dateOfBirth) VALUES (?,?,?)",
-        (username, password, DoB),
+        "INSERT INTO users (username, password, dateOfBirth) VALUES (?, ?, ?)",
+        (username, hashed_password, DoB)
     )
     con.commit()
     con.close()
 
-
 def retrieveUsers(username, password):
-    con = sql.connect("database_files/database.db")
-    cur = con.cursor()
-    cur.execute(f"SELECT * FROM users WHERE username = '{username}'")
-    if cur.fetchone() == None:
-        con.close()
-        return False
-    else:
-        cur.execute(f"SELECT * FROM users WHERE password = '{password}'")
-        # Plain text log of visitor count as requested by Unsecure PWA management
-        with open("visitor_log.txt", "r") as file:
-            number = int(file.read().strip())
-            number += 1
-        with open("visitor_log.txt", "w") as file:
-            file.write(str(number))
-        # Simulate response time of heavy app for testing purposes
-        time.sleep(random.randint(80, 90) / 1000)
-        if cur.fetchone() == None:
-            con.close()
+    """
+    Retrieve a user by username and password.
+    Combines username and password checks in a single parameterized query.
+    The provided password is hashed before comparison.
+    Also updates a visitor log in a secure manner.
+    """
+    hashed_password = hash_password(password)
+    try:
+        con = sql.connect("database_files/database.db")
+        cur = con.cursor()
+        # Combined check for username and hashed password
+        cur.execute("SELECT * FROM users WHERE username = ? AND password = ?", 
+                    (username, hashed_password)) #parametrized queries to prevent SQLi
+        user = cur.fetchone()
+        if user is None:
             return False
-        else:
-            con.close()
-            return True
 
+        # Update visitor log in a single file operation using r+ mode (more efficient)
+        try:
+            with open("visitor_log.txt", "r+") as file:
+                content = file.read().strip()
+                number = int(content) if content else 0
+                number += 1
+                file.seek(0)
+                file.write(str(number))
+                file.truncate()
+        except Exception:
+            pass
+        time.sleep(random.uniform(0.08, 0.09))  # Simulated delay for testing purposes can be removed in production
+        return True
+    finally:
+        con.close()
 
 def insertFeedback(feedback):
+    """
+    Insert user feedback into the database using a parameterized query.
+    The feedback is stored safely to prevent SQL injection.
+    """
     con = sql.connect("database_files/database.db")
     cur = con.cursor()
-    cur.execute(f"INSERT INTO feedback (feedback) VALUES ('{feedback}')")
+    cur.execute("INSERT INTO feedback (feedback) VALUES (?)", (feedback,)) 
     con.commit()
     con.close()
 
-
 def listFeedback():
-    con = sql.connect("database_files/database.db")
-    cur = con.cursor()
-    data = cur.execute("SELECT * FROM feedback").fetchall()
-    con.close()
-    f = open("templates/partials/success_feedback.html", "w")
-    for row in data:
-        f.write("<p>\n")
-        f.write(f"{row[1]}\n")
-        f.write("</p>\n")
-    f.close()
+    """
+    Retrieve all feedback from the database and safely write it to an HTML partial.
+    The output is escaped to prevent XSS vulnerabilities.
+    """
+    with sql.connect("database_files/database.db") as con, open("templates/partials/success_feedback.html", "w") as f:
+        feedbacks = con.execute("SELECT feedback FROM feedback").fetchall() #parametrized queries to prevent SQLi
+        f.writelines(f"<p>\n{html.escape(row[0])}\n</p>\n" for row in feedbacks) #escape feedback to prevent XSS
